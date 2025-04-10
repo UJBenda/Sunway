@@ -5,7 +5,7 @@
   "issue_tracker": "https://github.com/vase_jmeno/ha-sunway-fve/issues",
   "dependencies": ["modbus"],
   "codeowners": ["@vase_github_jmeno"],
-  "requirements": [],
-  "version": "0.1.1",
-  "config_flow": true
+  "requirements": [], 
+  "version": "0.1.0", 
+  "config_flow": true 
 }

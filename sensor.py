@@ -67,7 +67,7 @@ class SunwayModbusSensor(CoordinatorEntity, SensorEntity):
     # --- Volitelné vlastnosti pro lepší integraci ---
     @property
     def native_unit_of_measurement(self):
-        return self.entity_description.unit
+        return self.entity_description.native_unit_of_measurement
 
     @property
     def device_class(self):

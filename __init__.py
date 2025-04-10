@@ -1,243 +1,290 @@
 # custom_components/sunway_fve/__init__.py
-import logging
+
 import asyncio
+import logging
 from datetime import timedelta
-from pymodbus.client import ModbusTcpClient # Nebo ModbusSerialClient atd.
-from pymodbus.exceptions import ConnectionException
-from pymodbus.payload import BinaryPayloadDecoder
+
+# Import pro ASYNCHRONNÍ Modbus komunikaci
+from pymodbus.client import AsyncModbusTcpClient # Používáme Async klienta
+from pymodbus.exceptions import ConnectionException, ModbusIOException
+from pymodbus.payload import BinaryPayloadDecoder, BinaryPayloadBuilder
 from pymodbus.constants import Endian
 
+# Importy z Home Assistant Core
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_PORT, CONF_SCAN_INTERVAL, CONF_SLAVE
+from homeassistant.const import (
+    CONF_HOST,
+    CONF_PORT,
+    CONF_SCAN_INTERVAL,
+    CONF_SLAVE
+)
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.helpers.modbus import async_get_modbus_hub # Pro využití sdíleného hubu
+from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN, SENSOR_DESCRIPTIONS, RW_REGISTER_MAP # Importujte své konstanty
+# Importy z naší integrace (.const)
+from .const import (
+    DOMAIN,
+    SENSOR_DESCRIPTIONS,
+    RW_REGISTER_MAP,
+)
 
+# Nastavení loggeru
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["sensor", "switch", "number"] # Přidejte/odeberte platformy podle potřeby
+# Platformy
+PLATFORMS = ["sensor", "switch", "number"] # Upravte podle potřeby
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Sunway FVE from a config entry."""
+    """Nastaví Sunway FVE z konfiguračního záznamu."""
     hass.data.setdefault(DOMAIN, {})
     host = entry.data[CONF_HOST]
     port = entry.data[CONF_PORT]
     slave_id = entry.data[CONF_SLAVE]
-    scan_interval = timedelta(seconds=entry.data[CONF_SCAN_INTERVAL])
+    scan_interval = timedelta(seconds=entry.data.get(CONF_SCAN_INTERVAL, 30))
 
-    _LOGGER.debug(f"Setting up Sunway FVE integration for {host}:{port} (Slave ID: {slave_id})")
+    _LOGGER.info(f"Nastavuje se integrace Sunway FVE pro {host}:{port} (Slave ID: {slave_id}) s ASYNC klientem")
 
-    # Vytvoření Modbus klienta - Zvažte použití sdíleného Modbus hubu pro lepší správu
-    # client = ModbusTcpClient(host, port=port)
-    # hass.data[DOMAIN][entry.entry_id] = {"client": client}
+    coordinator = SunwayFveCoordinator(hass, host, port, slave_id, scan_interval, entry.entry_id)
 
-    # Vytvoření coordinatora pro pravidelné načítání dat
-    coordinator = SunwayFveCoordinator(hass, host, port, slave_id, scan_interval)
-
-    # První načtení dat pro ověření spojení a získání počátečních hodnot
-    await coordinator.async_config_entry_first_refresh()
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except ConfigEntryNotReady:
+        await coordinator.async_shutdown()
+        raise
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
-
-    # Předání nastavení platformám (sensor, switch, ...)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_on_unload(entry.add_update_listener(options_update_listener))
 
-    # TODO: Přidat listener pro aktualizaci options, pokud je implementujete
-
+    _LOGGER.info(f"Sunway FVE integrace pro {entry.title} byla úspěšně nastavena (async).")
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
+    """Odstraní konfigurační záznam."""
+    _LOGGER.info(f"Odebírám integraci Sunway FVE pro {entry.title} (async)")
+    coordinator = hass.data[DOMAIN].get(entry.entry_id)
+
+    if coordinator:
+        await coordinator.async_shutdown()
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
     if unload_ok:
-        # Ukončení spojení a odstranění dat
-        coordinator = hass.data[DOMAIN].pop(entry.entry_id)
-        # if isinstance(coordinator, SunwayFveCoordinator): # Ověření typu
-        #     await coordinator.async_shutdown() # Pokud máte metodu na zavření klienta v coordinatoru
-        # Zavření klienta, pokud není spravován coordinatorem
-        # client = hass.data[DOMAIN][entry.entry_id].get("client")
-        # if client:
-        #     client.close()
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+        _LOGGER.info(f"Sunway FVE integrace pro {entry.title} byla úspěšně odebrána (async).")
 
     return unload_ok
 
-class SunwayFveCoordinator(DataUpdateCoordinator):
-    """Coordinator to fetch data from Sunway FVE."""
+async def options_update_listener(hass: HomeAssistant, entry: ConfigEntry):
+    """Handle options update."""
+    _LOGGER.debug(f"Aktualizuji konfiguraci pro {entry.title} (async)")
+    await hass.config_entries.async_reload(entry.entry_id)
 
-    def __init__(self, hass: HomeAssistant, host: str, port: int, slave_id: int, scan_interval: timedelta):
-        """Initialize coordinator."""
+# --- ASYNCHRONNÍ Coordinator Class ---
+class SunwayFveCoordinator(DataUpdateCoordinator):
+    """ASYNC Coordinator pro získávání dat ze Sunway FVE."""
+
+    def __init__(self, hass: HomeAssistant, host: str, port: int, slave_id: int, scan_interval: timedelta, entry_id: str):
+        """Inicializace async coordinatora."""
+        _LOGGER.debug(f"Initializing ASYNC SunwayFveCoordinator for {entry_id}")
         super().__init__(
             hass,
             _LOGGER,
-            name=DOMAIN,
+            name=f"{DOMAIN} ({entry_id})_async",
             update_interval=scan_interval,
         )
+        self.hass = hass # Uložíme si hass pro pozdější použití v _read_registers
         self.host = host
         self.port = port
         self.slave_id = slave_id
-        # Vytvořte klienta zde, bude spravován coordinatorem
-        self._client = ModbusTcpClient(host, port=port)
-        # Můžete použít i: self._hub = async_get_modbus_hub(hass, ...) pro sdílený hub
+        self.entry_id = entry_id
+        # Zvýšíme timeout pro jistotu na 10s
+        self._client = AsyncModbusTcpClient(host, port=port, timeout=10)
+        self._lock = asyncio.Lock()
+        _LOGGER.debug(f"ASYNC SunwayFveCoordinator initialization finished for {entry_id}")
 
-    def _read_registers(self, address: int, count: int, data_type: str, scale: float) -> any:
-        """Helper to read and decode registers."""
-        # POZOR: Zvolte správnou funkci čtení - read_holding_registers (0x03) nebo read_input_registers (0x04)
-        # Většina stavových registrů bývá Input (RO), konfigurační Holding (RW). Ověřte!
-        # Zde předpokládám Holding pro všechny pro zjednodušení.
-        try:
-            # Zkuste optimalizovat čtení do bloků, pokud jsou registry blízko sebe
-            result = self._client.read_holding_registers(address, count, slave=self.slave_id)
-            if result.isError():
-                _LOGGER.debug(f"Modbus error reading {count} registers from {address}: {result}")
-                return None # Nebo vyvolejte výjimku
-
-            decoder = BinaryPayloadDecoder.fromRegisters(result.registers, byteorder=Endian.BIG, wordorder=Endian.BIG)
-            # Zpracování podle data_type
-            raw_value = None
-            if data_type == "U16":
-                raw_value = decoder.decode_16bit_uint()
-            elif data_type == "I16":
-                raw_value = decoder.decode_16bit_int()
-            elif data_type == "U32":
-                raw_value = decoder.decode_32bit_uint()
-            elif data_type == "I32":
-                 raw_value = decoder.decode_32bit_int()
-            elif data_type == "STR":
-                 # Pro stringy je potřeba číst více registrů a dekódovat je
-                 raw_value = decoder.decode_string(count * 2).rstrip(b'\x00').decode('utf-8') # *2 protože registr má 2 bajty
-            # Přidejte další typy (např. 64bit) pokud je potřeba
-
-            if raw_value is not None:
-                 if data_type != "STR": # Scale neaplikujeme na string
-                     if scale != 1.0:
-                         if scale > 1:
-                             return raw_value / scale
-                         else: # scale < 1 (např. 0.1)
-                             return raw_value * scale
-                     else:
-                         return raw_value
-                 else:
-                    return raw_value # Vracíme string
-            return None
-
-        except ConnectionException as e:
-            _LOGGER.debug(f"Modbus connection error: {e}")
-            raise UpdateFailed(f"Modbus connection error: {e}") from e
-        except Exception as e:
-            _LOGGER.error(f"Error reading Modbus register {address}: {e}")
-            return None # Vrací None při jiné chybě čtení
-
-    async def _async_update_data(self):
-        """Fetch data from API endpoint.
-
-        This is the place to pre-process the data to lookup tables
-        so entities can quickly look up their data.
-        """
-        data = {}
-        try:
-            # Připojení k Modbus zařízení (pokud není trvale otevřené)
-            if not self._client.is_socket_open():
-               self._client.connect() # Zpracujte výjimky
-
-            # Čtení všech potřebných registrů - optimalizujte do bloků!
-            for desc in SENSOR_DESCRIPTIONS:
-                # Optimalizace: Místo čtení každého registru zvlášť, seskupte je
-                # a přečtěte v blocích. Toto je jen základní příklad.
-                value = await self.hass.async_add_executor_job(
-                    self._read_registers, desc.register_address, desc.register_count, desc.data_type, desc.scale
-                )
-                data[desc.key] = value
-                _LOGGER.debug(f"Read {desc.key}: Address={desc.register_address}, Value={value}")
-
-            # Načtení RW registrů pro switche/numbers (pokud je chcete zobrazovat aktuální stav)
-            for key, params in RW_REGISTER_MAP.items():
-                desc = next((d for d in SENSOR_DESCRIPTIONS if d.key == key), None) # Najdi popis v sensors
-                if desc: # Pokud existuje popis v sensors, použij ho
-                    value = await self.hass.async_add_executor_job(
-                        self._read_registers, desc.register_address, desc.register_count, desc.data_type, desc.scale
-                     )
-                elif 'data_type' in params and 'count' in params and 'scale' in params: # Pokud ne, použij data z RW_REGISTER_MAP
-                     value = await self.hass.async_add_executor_job(
-                        self._read_registers, params['address'], params['count'], params['data_type'], params['scale']
-                     )
-                else: # Pokud nemáme dost info, přeskočíme čtení
-                    value = None
-                    _LOGGER.warning(f"Skipping read for RW register {key} due to missing definition info")
-
-                if value is not None:
-                    data[key] = value
-                    _LOGGER.debug(f"Read RW {key}: Address={params['address']}, Value={value}")
-
-
-            # Uzavření spojení (pokud není trvale otevřené)
-            # self._client.close() # Pokud chcete spojení zavírat po každém čtení
-
-            if not data: # Pokud se nepodařilo nic přečíst
-                raise UpdateFailed("No data received from inverter")
-
-            return data
-        except ConnectionException as err:
-            # Pokud se nepodaří připojit, zavřeme spojení a vyvoláme chybu
-            if self._client.is_socket_open():
-                self._client.close()
-            raise UpdateFailed(f"Error communicating with API: {err}") from err
-        except Exception as err:
-            # Pokud nastane jiná chyba při čtení
-            if self._client.is_socket_open():
-                self._client.close() # Pro jistotu zavřít
-            raise UpdateFailed(f"Unknown error during update: {err}") from err
+    async def _ensure_connection(self) -> bool:
+        """Zajistí, že klient je připojen (voláno z async metod)."""
+        if not self._client.connected:
+            _LOGGER.info(f"Async Modbus klient není připojen, pokouším se připojit k {self.host}:{self.port}")
+            try:
+                await self._client.connect()
+                return self._client.connected
+            except Exception as e:
+                _LOGGER.warning(f"Selhalo připojení Async Modbus klienta: {e}", exc_info=True)
+                return False
+        return True
 
     async def async_shutdown(self) -> None:
-        """Close the Modbus client connection."""
-        if self._client.is_socket_open():
-            self._client.close()
+        """Zavře Modbus spojení při ukončení."""
+        _LOGGER.info("Async Coordinator shutdown - Zavírám Modbus spojení.")
+        if self._client.connected:
+             self._client.close()
         await super().async_shutdown()
 
-    # Přidejte metody pro zápis registrů (pro switche, numbers)
-    async def async_write_register(self, address: int, value: int):
-        """Write a single holding register."""
-        # POZOR: Zápis je obvykle do Holding registrů (0x06 write single, 0x10 write multiple)
-        _LOGGER.debug(f"Writing value {value} to register {address}")
+    async def _read_registers(self, address: int, count: int, data_type: str, scale: float, read_func) -> any:
+        """Pomocná ASYNC funkce pro čtení a dekódování registrů."""
+        # read_func je nyní předána z _async_update_data
         try:
-            if not self._client.is_socket_open():
-                self._client.connect() # Zpracujte výjimky
-            # Použijte write_register pro jeden registr nebo write_registers pro více
-            result = await self.hass.async_add_executor_job(
-                 self._client.write_register, address, value, slave=self.slave_id
+            _LOGGER.debug(
+                f"Attempting ASYNC read: Func={read_func.__name__}, Address={address}, Count={count}, SlaveID={self.slave_id}"
             )
+            # Používáme explicitní pojmenování argumentů
+            result = await read_func(address=address, count=count, slave=self.slave_id)
+
             if result.isError():
-                _LOGGER.error(f"Modbus error writing register {address}: {result}")
-                return False
-            # Po úspěšném zápisu je dobré spustit refresh dat coordinatora
-            await self.async_request_refresh()
-            return True
+                _LOGGER.warning(f"Async Modbus read error for address {address}: {result}")
+                return None
+            else:
+                if _LOGGER.isEnabledFor(logging.DEBUG):
+                    _LOGGER.debug(f"Async Modbus read successful for address {address}, Raw Registers: {result.registers}")
+
+            decoder = BinaryPayloadDecoder.fromRegisters(
+                result.registers, byteorder=Endian.BIG, wordorder=Endian.BIG
+            )
+            raw_value = None
+            if data_type == "U16": raw_value = decoder.decode_16bit_uint()
+            elif data_type == "I16": raw_value = decoder.decode_16bit_int()
+            elif data_type == "U32": raw_value = decoder.decode_32bit_uint()
+            elif data_type == "I32": raw_value = decoder.decode_32bit_int()
+            elif data_type == "STR":
+                 string_length = count * 2
+                 raw_value = decoder.decode_string(string_length).rstrip(b'\x00').decode('utf-8', errors='ignore')
+            else:
+                _LOGGER.warning(f"Neznámý datový typ '{data_type}' pro adresu {address}")
+                return None
+
+            if raw_value is not None and data_type != "STR":
+                 if scale != 1.0:
+                     try:
+                         scaled_value = float(raw_value)
+                         if scale > 1: return scaled_value / scale
+                         elif scale < 1 and scale != 0: return scaled_value * scale
+                         else: return scaled_value
+                     except (ValueError, TypeError) as e:
+                         _LOGGER.error(f"Chyba při ASYNC scale {scale} na {raw_value} pro adresu {address}: {e}")
+                         return None
+                 else: return raw_value
+            elif raw_value is not None and data_type == "STR": return raw_value
+            else: return None
+
+        except ModbusIOException as e:
+             _LOGGER.warning(f"Async Modbus IO chyba při čtení registru {address}: {e}")
+             return None
         except ConnectionException as e:
-            _LOGGER.error(f"Modbus connection error during write: {e}")
-            return False
+            _LOGGER.warning(f"Async Modbus Connection chyba při čtení registru {address}: {e}")
+            if self._client.connected: self._client.close()
+            return None
         except Exception as e:
-            _LOGGER.error(f"Error writing Modbus register {address}: {e}")
-            return False
+            _LOGGER.error(f"Neočekávaná chyba v ASYNC _read_registers pro adresu {address}: {e}", exc_info=True)
+            return None
+
+    async def _async_update_data(self):
+        """ASYNCHRONNÍ získávání dat ze zařízení."""
+        data = {}
+        async with self._lock:
+            try:
+                is_connected = await self._ensure_connection()
+                if not is_connected:
+                    raise UpdateFailed(f"Nepodařilo se připojit k {self.host}:{self.port}")
+
+                _LOGGER.debug(f"Zahajuji ASYNC čtení dat pro {self.name}")
+                start_time = asyncio.get_event_loop().time()
+
+                # V této verzi NEROZLIŠUJEME holding/input, čteme vše jako holding
+                read_func_to_use = self._client.read_holding_registers
+
+                tasks = []
+                valid_sensor_descriptions = []
+                # Smyčka pro senzory
+                for desc in SENSOR_DESCRIPTIONS:
+                     # Použijeme vždy stejnou funkci (v této verzi)
+                     tasks.append(self._read_registers(desc.register_address, desc.register_count, desc.data_type, desc.scale, read_func_to_use))
+                     valid_sensor_descriptions.append(desc)
+
+                valid_rw_params = []
+                 # Smyčka pro RW registry
+                for key, params in RW_REGISTER_MAP.items():
+                    rw_count = params.get('count', 1)
+                    rw_type = params.get('data_type', 'U16')
+                    rw_scale = params.get('scale', 1.0)
+                    # Použijeme vždy stejnou funkci (v této verzi)
+                    tasks.append(self._read_registers(params['address'], rw_count, rw_type, rw_scale, read_func_to_use))
+                    valid_rw_params.append((key, params))
+
+                # Spustíme všechny čtecí úlohy paralelně
+                results = await asyncio.gather(*tasks)
+
+                # Zpracujeme výsledky
+                result_index = 0
+                for desc in valid_sensor_descriptions:
+                    value = results[result_index]
+                    if value is not None: data[desc.key] = value
+                    result_index += 1
+                for key, params in valid_rw_params:
+                    value = results[result_index]
+                    if value is not None: data[key] = value
+                    result_index += 1
+
+                end_time = asyncio.get_event_loop().time()
+                _LOGGER.debug(f"ASYNC Čtení dat dokončeno za {end_time - start_time:.3f} sekund. Získáno klíčů: {len(data)}")
+
+                if not data and (valid_sensor_descriptions or valid_rw_params):
+                     _LOGGER.warning("Nezískaná žádná data z ASYNC čtení, i když definice existují.")
+
+                return data
+
+            except ConnectionException as err:
+                _LOGGER.warning(f"ASYNC Chyba připojení při aktualizaci dat: {err}")
+                if self._client.connected: self._client.close()
+                raise UpdateFailed(f"ASYNC Chyba připojení: {err}") from err
+            except Exception as err:
+                _LOGGER.error(f"Neočekávaná chyba v ASYNC _async_update_data: {err}", exc_info=True)
+                if self._client.connected: self._client.close()
+                raise UpdateFailed(f"Neočekávaná chyba v ASYNC update: {err}") from err
+
+    # --- ASYNCHRONNÍ Metody pro zápis ---
+    # Používají také explicitní pojmenování argumentů a slave=
+
+    async def async_write_register(self, address: int, value: int):
+        """Zapíše jeden 16bitový registr (Holding) ASYNCHRONNĚ."""
+        async with self._lock:
+            try:
+                is_connected = await self._ensure_connection()
+                if not is_connected:
+                    _LOGGER.error(f"ASYNC Zápis selhal: Nepodařilo se připojit k {self.host}:{self.port}")
+                    return False
+                _LOGGER.debug(f"Pokus o ASYNC zápis hodnoty {value} na adresu {address} (Slave: {self.slave_id})")
+                result = await self._client.write_register(address=address, value=value, slave=self.slave_id)
+                if result.isError():
+                    _LOGGER.error(f"ASYNC Modbus chyba při zápisu na adresu {address}: {result}")
+                    return False
+                else:
+                    _LOGGER.info(f"ASYNC Úspěšně zapsána hodnota {value} na adresu {address}")
+                    await self.async_request_refresh()
+                    return True
+            except Exception as e:
+                _LOGGER.error(f"Neočekávaná chyba při ASYNC zápisu na adresu {address}: {e}", exc_info=True)
+                return False
 
     async def async_write_multiple_registers(self, address: int, values: list[int]):
-        """Write multiple holding registers."""
-        # Potřebné pro zápis 32bit hodnot (které zabírají 2 registry)
-        _LOGGER.debug(f"Writing multiple values {values} to starting register {address}")
-        try:
-            if not self._client.is_socket_open():
-                self._client.connect()
-            result = await self.hass.async_add_executor_job(
-                self._client.write_registers, address, values, slave=self.slave_id
-            )
-            if result.isError():
-                _LOGGER.error(f"Modbus error writing multiple registers at {address}: {result}")
+        """Zapíše více 16bitových registrů (Holding) ASYNCHRONNĚ."""
+        async with self._lock:
+            try:
+                is_connected = await self._ensure_connection()
+                if not is_connected:
+                    _LOGGER.error(f"ASYNC Zápis více registrů selhal: Nepodařilo se připojit k {self.host}:{self.port}")
+                    return False
+                _LOGGER.debug(f"Pokus o ASYNC zápis hodnot {values} od adresy {address} (Slave: {self.slave_id})")
+                result = await self._client.write_registers(address=address, values=values, slave=self.slave_id)
+                if result.isError():
+                    _LOGGER.error(f"ASYNC Modbus chyba při zápisu více registrů od adresy {address}: {result}")
+                    return False
+                else:
+                    _LOGGER.info(f"ASYNC Úspěšně zapsány hodnoty {values} od adresy {address}")
+                    await self.async_request_refresh()
+                    return True
+            except Exception as e:
+                _LOGGER.error(f"Neočekávaná chyba při ASYNC zápisu více registrů od adresy {address}: {e}", exc_info=True)
                 return False
-            await self.async_request_refresh()
-            return True
-        except ConnectionException as e:
-            _LOGGER.error(f"Modbus connection error during multiple write: {e}")
-            return False
-        except Exception as e:
-            _LOGGER.error(f"Error writing multiple Modbus registers at {address}: {e}")
-            return False
