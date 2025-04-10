@@ -1,0 +1,12 @@
+// custom_components/sunway_fve/manifest.json
+{
+  "domain": "sunway_fve",
+  "name": "Sunway FVE Modbus",
+  "documentation": "https://github.com/vase_jmeno/ha-sunway-fve", // Nahraďte odkazem na vaši dokumentaci/repozitář
+  "issue_tracker": "https://github.com/vase_jmeno/ha-sunway-fve/issues", // Nahraďte
+  "dependencies": ["modbus"],
+  "codeowners": ["@vase_github_jmeno"], // Nahraďte
+  "requirements": [], // Případné další Python knihovny
+  "version": "0.1.0", // Začněte s nízkou verzí
+  "config_flow": true // Povolí konfiguraci přes UI
+}
