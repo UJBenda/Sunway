@@ -1,0 +1,358 @@
+# -*- coding: utf-8 -*-
+# Plugin for Sunway Inverters for wills106/homeassistant-solax-modbus
+# Based on user-provided register map - VERSION 28 (Added fmt attribute)
+
+import logging
+from dataclasses import dataclass, field
+from typing import Optional, Any, Dict, List, Tuple, Set, Callable
+
+# Import constants and types from the main Solax integration's const.py
+try:
+    from .const import (
+        REGISTER_U16, REGISTER_S16, REGISTER_U32, REGISTER_S32, REGISTER_STR, REGISTER_WORDS,
+    )
+    # Importujeme základní popisné třídy z HA, ze kterých budeme dědit
+    from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass, SensorEntityDescription
+    from homeassistant.components.switch import SwitchEntityDescription
+    from homeassistant.components.number import NumberEntityDescription, NumberMode
+    from homeassistant.components.select import SelectEntityDescription
+    from homeassistant.components.button import ButtonEntityDescription
+
+    from homeassistant.const import (
+        UnitOfEnergy, UnitOfPower, UnitOfTemperature, UnitOfElectricCurrent,
+        UnitOfElectricPotential, UnitOfFrequency, PERCENTAGE, UnitOfTime,
+    )
+    try:
+         from homeassistant.const import UnitOfReactivePower
+         VAR_UNIT = UnitOfReactivePower.VOLT_AMPERE_REACTIVE
+    except ImportError:
+         VAR_UNIT = "var"
+    from pymodbus.constants import Endian
+except ImportError as e:
+    # Fallback definice
+    _LOGGER = logging.getLogger(__name__)
+    _LOGGER.error(f"Sunway Plugin: Failed to import constants or base class: {e}. Using fallbacks.")
+    REGISTER_U16, REGISTER_S16, REGISTER_U32, REGISTER_S32, REGISTER_STR, REGISTER_WORDS = 'U16', 'S16', 'U32', 'S32', 'STR', 'WORDS'
+    class SensorDeviceClass: ENERGY=None; POWER=None; VOLTAGE=None; CURRENT=None; FREQUENCY=None; TEMPERATURE=None; BATTERY=None
+    class SensorStateClass: MEASUREMENT=None; TOTAL_INCREASING=None
+    UnitOfEnergy, UnitOfPower, UnitOfTemperature, UnitOfElectricCurrent = None, None, None, None
+    UnitOfElectricPotential, UnitOfFrequency, PERCENTAGE, UnitOfTime = None, None, None, None
+    VAR_UNIT = "var"
+    class Endian: BIG=None; LITTLE=None
+    SensorEntityDescription=dict; SwitchEntityDescription=dict; NumberEntityDescription=dict; SelectEntityDescription=dict; ButtonEntityDescription=dict; NumberMode=dict
+    def field(**kwargs): return None
+    def dataclass(_cls=None, *, init=True, repr=True, eq=True, order=False, unsafe_hash=False, frozen=False, kw_only=False, slots=False, weakref_slot=False): return lambda cls: cls
+    Dict = dict; Optional = None; Any = None; List = list; Tuple = tuple; Set = set; Callable = None
+
+# Definujeme názvy skupin jako stringy
+SCAN_GROUP_SYSTEM_INFO = "scan_group_system_info"
+SCAN_GROUP_POWERS = "scan_group_powers"
+SCAN_GROUP_ENERGY = "scan_group_energy"
+SCAN_GROUP_BATTERY = "scan_group_battery"
+SCAN_GROUP_CONTROL = "scan_group_control"
+
+_LOGGER = logging.getLogger(__name__)
+
+# === DEFINICE REGISTRŮ MIMO TŘÍDU ===
+_holding_regs = [
+    # ... (kompletní seznam holding registrů) ...
+    (10000, REGISTER_STR, 'inverter_sn', "Inverter Serial Number", None, 1, 'holding', SCAN_GROUP_SYSTEM_INFO, None, None),
+    (10011, REGISTER_U32, 'firmware_version', "Firmware Version", None, 1, 'holding', SCAN_GROUP_SYSTEM_INFO, None, None),
+    (10104, REGISTER_U16, 'grid_regulation_status_code', "Grid Regulation Status Code", None, 1, 'holding', SCAN_GROUP_ENERGY, None, None),
+    (10105, REGISTER_U16, 'running_status_code', "Inverter Running Status Code", None, 1, 'holding', SCAN_GROUP_ENERGY, None, None),
+    (10112, REGISTER_U32, 'fault_flag1_code', "Fault FLAG1 Code", None, 1, 'holding', SCAN_GROUP_ENERGY, None, None),
+    (11036, REGISTER_U32, 'arm_fault_flag1_code', "ARM Fault FLAG1 Code", None, 1, 'holding', SCAN_GROUP_ENERGY, None, None),
+    (11001, REGISTER_U16, 'grid_phase_a_voltage', "Grid Phase A Voltage", UnitOfElectricPotential.VOLT, 10, 'holding', SCAN_GROUP_POWERS, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+    (11002, REGISTER_U16, 'grid_phase_a_current', "Grid Phase A Current", UnitOfElectricCurrent.AMPERE, 10, 'holding', SCAN_GROUP_POWERS, SensorDeviceClass.CURRENT, SensorStateClass.MEASUREMENT),
+    (11003, REGISTER_U16, 'grid_phase_b_voltage', "Grid Phase B Voltage", UnitOfElectricPotential.VOLT, 10, 'holding', SCAN_GROUP_POWERS, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+    (11004, REGISTER_U16, 'grid_phase_b_current', "Grid Phase B Current", UnitOfElectricCurrent.AMPERE, 10, 'holding', SCAN_GROUP_POWERS, SensorDeviceClass.CURRENT, SensorStateClass.MEASUREMENT),
+    (11005, REGISTER_U16, 'grid_phase_c_voltage', "Grid Phase C Voltage", UnitOfElectricPotential.VOLT, 10, 'holding', SCAN_GROUP_POWERS, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+    (11006, REGISTER_U16, 'grid_phase_c_current', "Grid Phase C Current", UnitOfElectricCurrent.AMPERE, 10, 'holding', SCAN_GROUP_POWERS, SensorDeviceClass.CURRENT, SensorStateClass.MEASUREMENT),
+    (11029, REGISTER_U16, 'pv1_current', "PV1 Current", UnitOfElectricCurrent.AMPERE, 10, 'holding', SCAN_GROUP_POWERS, SensorDeviceClass.CURRENT, SensorStateClass.MEASUREMENT),
+    (42000, REGISTER_U16, 'battery_types_code', "Battery Types Code", None, 1, 'holding', SCAN_GROUP_SYSTEM_INFO, None, None),
+    (42001, REGISTER_U16, 'battery_strings', "Battery Strings", None, 1, 'holding', SCAN_GROUP_SYSTEM_INFO, None, None),
+    (42002, REGISTER_U16, 'battery_protocol_code', "Battery Protocol Code", None, 1, 'holding', SCAN_GROUP_SYSTEM_INFO, None, None),
+    (42003, REGISTER_U16, 'bms_software_version', "BMS Software Version", None, 1, 'holding', SCAN_GROUP_SYSTEM_INFO, None, None),
+    (42004, REGISTER_U16, 'bms_hardware_version', "BMS Hardware Version", None, 1, 'holding', SCAN_GROUP_SYSTEM_INFO, None, None),
+    (25100, REGISTER_U16, 'grid_injection_limit_switch_state', "Grid Injection Limit Switch State", None, 1, 'holding', SCAN_GROUP_CONTROL, None, None),
+    (25103, REGISTER_U16, 'grid_injection_limit_setting_read', "Grid Injection Limit Setting Read", PERCENTAGE, 0.1, 'holding', SCAN_GROUP_CONTROL, None, SensorStateClass.MEASUREMENT),
+    (50000, REGISTER_U16, 'hybrid_working_mode_read', "Hybrid Working Mode Read", None, 1, 'holding', SCAN_GROUP_CONTROL, None, None),
+    (50001, REGISTER_U16, 'eps_ups_switch_state', "EPS/UPS Function Switch State", None, 1, 'holding', SCAN_GROUP_CONTROL, None, None),
+    (50004, REGISTER_U16, 'off_grid_voltage_setting_read', "Off-grid Voltage Setting Read", UnitOfElectricPotential.VOLT, 10, 'holding', SCAN_GROUP_CONTROL, None, SensorStateClass.MEASUREMENT),
+    (50005, REGISTER_U16, 'off_grid_frequency_setting_read', "Off-grid Frequency Setting Read", UnitOfFrequency.HERTZ, 100, 'holding', SCAN_GROUP_CONTROL, None, SensorStateClass.MEASUREMENT),
+    (50006, REGISTER_U16, 'off_grid_asymmetric_switch_state', "Off-grid Asymmetric Switch State", None, 1, 'holding', SCAN_GROUP_CONTROL, None, None),
+    (50007, REGISTER_U16, 'peak_load_shifting_switch_state', "Peak Load Shifting Switch State", None, 1, 'holding', SCAN_GROUP_CONTROL, None, None),
+    (50009, REGISTER_U16, 'max_grid_power_setting_read', "Max Grid Power Setting Read", "kVA", 10, 'holding', SCAN_GROUP_CONTROL, None, SensorStateClass.MEASUREMENT),
+    (50202, REGISTER_U16, 'inverter_ac_power_setting_mode_read', "AC Power Setting Mode Read", None, 1, 'holding', SCAN_GROUP_CONTROL, None, None),
+    (50203, REGISTER_S16, 'total_ac_power_setting_read', "Total AC Power Setting Read", UnitOfPower.KILO_WATT, 100, 'holding', SCAN_GROUP_CONTROL, None, SensorStateClass.MEASUREMENT),
+    (50204, REGISTER_S16, 'phase_a_power_setting_read', "Phase A Power Setting Read", UnitOfPower.KILO_WATT, 100, 'holding', SCAN_GROUP_CONTROL, None, SensorStateClass.MEASUREMENT),
+    (50205, REGISTER_S16, 'phase_b_power_setting_read', "Phase B Power Setting Read", UnitOfPower.KILO_WATT, 100, 'holding', SCAN_GROUP_CONTROL, None, SensorStateClass.MEASUREMENT),
+    (50206, REGISTER_S16, 'phase_c_power_setting_read', "Phase C Power Setting Read", UnitOfPower.KILO_WATT, 100, 'holding', SCAN_GROUP_CONTROL, None, SensorStateClass.MEASUREMENT),
+    (50207, REGISTER_S16, 'battery_power_setting_read', "Battery Power Setting Read", UnitOfPower.KILO_WATT, 100, 'holding', SCAN_GROUP_CONTROL, None, SensorStateClass.MEASUREMENT),
+]
+_input_regs = [
+    # ... (kompletní seznam input registrů) ...
+    (10114, REGISTER_S32, 'phase_a_power_on_meter', "Phase A Power on Meter", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (10116, REGISTER_S32, 'phase_b_power_on_meter', "Phase B Power on Meter", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (10118, REGISTER_S32, 'phase_c_power_on_meter', "Phase C Power on Meter", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (10120, REGISTER_S32, 'total_power_on_meter', "Total Power on Meter", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (10994, REGISTER_U32, 'total_grid_injection_energy_meter', "Total Grid-Injection Energy on Meter", UnitOfEnergy.KILO_WATT_HOUR, 100, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (10996, REGISTER_U32, 'total_energy_purchased_grid_meter', "Total Energy Purchased from Grid on Meter", UnitOfEnergy.KILO_WATT_HOUR, 100, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (10998, REGISTER_U16, 'grid_line_ab_voltage', "Grid Lines A-B Voltage", UnitOfElectricPotential.VOLT, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+    (10999, REGISTER_U16, 'grid_line_bc_voltage', "Grid Lines B-C Voltage", UnitOfElectricPotential.VOLT, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+    (11000, REGISTER_U16, 'grid_line_ca_voltage', "Grid Lines C-A Voltage", UnitOfElectricPotential.VOLT, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+    (11007, REGISTER_U16, 'grid_frequency', "Grid Frequency", UnitOfFrequency.HERTZ, 100, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.FREQUENCY, SensorStateClass.MEASUREMENT),
+    (11008, REGISTER_S32, 'power_ac', "AC Power", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (11010, REGISTER_U32, 'pv_gen_today', "PV Generation Today", UnitOfEnergy.KILO_WATT_HOUR, 10, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (11012, REGISTER_U32, 'pv_gen_total', "PV Generation Total", UnitOfEnergy.KILO_WATT_HOUR, 10, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (11014, REGISTER_U32, 'pv_gen_time_total', "PV Generation Time Total", UnitOfTime.HOURS, 1, 'input', SCAN_GROUP_ENERGY, None, SensorStateClass.TOTAL_INCREASING),
+    (11016, REGISTER_U32, 'pv_total_power', "PV Input Total Power", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (11018, REGISTER_S16, 'temp_sensor_1', "Temperature Sensor 1", UnitOfTemperature.CELSIUS, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.TEMPERATURE, SensorStateClass.MEASUREMENT),
+    (11019, REGISTER_S16, 'temp_sensor_2', "Temperature Sensor 2", UnitOfTemperature.CELSIUS, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.TEMPERATURE, SensorStateClass.MEASUREMENT),
+    (11020, REGISTER_S16, 'temp_sensor_3', "Temperature Sensor 3", UnitOfTemperature.CELSIUS, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.TEMPERATURE, SensorStateClass.MEASUREMENT),
+    (11021, REGISTER_S16, 'temp_sensor_4', "Temperature Sensor 4", UnitOfTemperature.CELSIUS, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.TEMPERATURE, SensorStateClass.MEASUREMENT),
+    (11028, REGISTER_U16, 'pv1_voltage', "PV1 Voltage", UnitOfElectricPotential.VOLT, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+    (11030, REGISTER_U16, 'pv2_voltage', "PV2 Voltage", UnitOfElectricPotential.VOLT, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+    (11031, REGISTER_U16, 'pv2_current', "PV2 Current", UnitOfElectricCurrent.AMPERE, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.CURRENT, SensorStateClass.MEASUREMENT),
+    (11032, REGISTER_U32, 'pv1_input_power', "PV1 Input Power", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (11034, REGISTER_U32, 'pv2_input_power', "PV2 Input Power", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (40200, REGISTER_U16, 'backup_a_v', "Backup Phase A Voltage", UnitOfElectricPotential.VOLT, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+    (40201, REGISTER_U16, 'backup_a_i', "Backup Phase A Current", UnitOfElectricCurrent.AMPERE, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.CURRENT, SensorStateClass.MEASUREMENT),
+    (40202, REGISTER_U16, 'backup_a_f', "Backup Phase A Frequency", UnitOfFrequency.HERTZ, 100, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.FREQUENCY, SensorStateClass.MEASUREMENT),
+    (40204, REGISTER_S32, 'backup_a_p', "Backup Phase A Power", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (40210, REGISTER_U16, 'backup_b_v', "Backup Phase B Voltage", UnitOfElectricPotential.VOLT, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+    (40211, REGISTER_U16, 'backup_b_i', "Backup Phase B Current", UnitOfElectricCurrent.AMPERE, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.CURRENT, SensorStateClass.MEASUREMENT),
+    (40212, REGISTER_U16, 'backup_b_f', "Backup Phase B Frequency", UnitOfFrequency.HERTZ, 100, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.FREQUENCY, SensorStateClass.MEASUREMENT),
+    (40214, REGISTER_S32, 'backup_b_p', "Backup Phase B Power", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (40220, REGISTER_U16, 'backup_c_v', "Backup Phase C Voltage", UnitOfElectricPotential.VOLT, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+    (40221, REGISTER_U16, 'backup_c_i', "Backup Phase C Current", UnitOfElectricCurrent.AMPERE, 10, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.CURRENT, SensorStateClass.MEASUREMENT),
+    (40222, REGISTER_U16, 'backup_c_f', "Backup Phase C Frequency", UnitOfFrequency.HERTZ, 100, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.FREQUENCY, SensorStateClass.MEASUREMENT),
+    (40224, REGISTER_S32, 'backup_c_p', "Backup Phase C Power", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (40230, REGISTER_S32, 'total_backup_p', "Total Backup Power", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (40236, REGISTER_S32, 'invt_a_p', "Inverter Phase A Power", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (40242, REGISTER_S32, 'invt_b_p', "Inverter Phase B Power", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (40248, REGISTER_S32, 'invt_c_p', "Inverter Phase C Power", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_POWERS, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (40254, REGISTER_U16, 'battery_v', "Battery Voltage", UnitOfElectricPotential.VOLT, 10, 'input', SCAN_GROUP_BATTERY, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+    (40255, REGISTER_S16, 'battery_current', "Battery Current", UnitOfElectricCurrent.AMPERE, 10, 'input', SCAN_GROUP_BATTERY, SensorDeviceClass.CURRENT, SensorStateClass.MEASUREMENT),
+    (40256, REGISTER_U16, 'battery_mode_code', "Battery Mode Code", None, 1, 'input', SCAN_GROUP_BATTERY, None, None),
+    (40258, REGISTER_S32, 'battery_power', "Battery Power", UnitOfPower.KILO_WATT, 1000, 'input', SCAN_GROUP_BATTERY, SensorDeviceClass.POWER, SensorStateClass.MEASUREMENT),
+    (41000, REGISTER_U16, 'energy_grid_injection_today', "Energy Grid Injection Today", UnitOfEnergy.KILO_WATT_HOUR, 10, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (41001, REGISTER_U16, 'energy_grid_purchase_today', "Energy Grid Purchase Today", UnitOfEnergy.KILO_WATT_HOUR, 10, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (41002, REGISTER_U16, 'energy_backup_output_today', "Energy Backup Output Today", UnitOfEnergy.KILO_WATT_HOUR, 10, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (41003, REGISTER_U16, 'energy_battery_charge_today', "Energy Battery Charge Today", UnitOfEnergy.KILO_WATT_HOUR, 10, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (41004, REGISTER_U16, 'energy_battery_discharge_today', "Energy Battery Discharge Today", UnitOfEnergy.KILO_WATT_HOUR, 10, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (41006, REGISTER_U16, 'energy_loading_today', "Loading Energy Today", UnitOfEnergy.KILO_WATT_HOUR, 10, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (41102, REGISTER_U32, 'total_energy_injected_grid', "Total Energy Injected to Grid", UnitOfEnergy.KILO_WATT_HOUR, 10, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (41104, REGISTER_U32, 'total_energy_purchased_grid_meter_alt', "Total Energy Purchased from Grid from Meter Alt", UnitOfEnergy.KILO_WATT_HOUR, 10, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (41106, REGISTER_U32, 'total_energy_backup_output', "Total Backup Output Energy", UnitOfEnergy.KILO_WATT_HOUR, 10, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (41108, REGISTER_U32, 'total_energy_battery_charge', "Total Energy Charged to Battery", UnitOfEnergy.KILO_WATT_HOUR, 10, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (41110, REGISTER_U32, 'total_energy_battery_discharge', "Total Energy Discharged from Battery", UnitOfEnergy.KILO_WATT_HOUR, 10, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (41114, REGISTER_U32, 'total_loading_energy_grid_side', "Total Loading Energy Consumed (Grid Side)", UnitOfEnergy.KILO_WATT_HOUR, 10, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (41118, REGISTER_U32, 'total_energy_purchased_inverter_side', "Total Energy Purchased (Inverter Side)", UnitOfEnergy.KILO_WATT_HOUR, 10, 'input', SCAN_GROUP_ENERGY, SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING),
+    (42005, REGISTER_U16, 'bms_charge_imax', "BMS Charge Imax", UnitOfElectricCurrent.AMPERE, 10, 'input', SCAN_GROUP_BATTERY, SensorDeviceClass.CURRENT, SensorStateClass.MEASUREMENT),
+    (42006, REGISTER_U16, 'bms_discharge_imax', "BMS Discharge Imax", UnitOfElectricCurrent.AMPERE, 10, 'input', SCAN_GROUP_BATTERY, SensorDeviceClass.CURRENT, SensorStateClass.MEASUREMENT),
+    (43000, REGISTER_U16, 'battery_soc', "Battery SOC", PERCENTAGE, 100, 'input', SCAN_GROUP_BATTERY, SensorDeviceClass.BATTERY, SensorStateClass.MEASUREMENT),
+    (43001, REGISTER_U16, 'battery_soh', "Battery SOH", PERCENTAGE, 100, 'input', SCAN_GROUP_BATTERY, None, SensorStateClass.MEASUREMENT),
+    (43002, REGISTER_U16, 'bms_status_code', "BMS Status Code", None, 1, 'input', SCAN_GROUP_BATTERY, None, None), # Needs mapping
+    (43003, REGISTER_U16, 'bms_pack_temp', "BMS Pack Temperature", UnitOfTemperature.CELSIUS, 10, 'input', SCAN_GROUP_BATTERY, SensorDeviceClass.TEMPERATURE, SensorStateClass.MEASUREMENT),
+    (43008, REGISTER_U16, 'bms_max_cell_temp_id', "BMS Max Cell Temperature ID", None, 1, 'input', SCAN_GROUP_BATTERY, None, None),
+    (43009, REGISTER_U16, 'bms_max_cell_temp', "BMS Max Cell Temperature", UnitOfTemperature.CELSIUS, 10, 'input', SCAN_GROUP_BATTERY, SensorDeviceClass.TEMPERATURE, SensorStateClass.MEASUREMENT),
+    (43010, REGISTER_U16, 'bms_min_cell_temp_id', "BMS Min Cell Temperature ID", None, 1, 'input', SCAN_GROUP_BATTERY, None, None),
+    (43011, REGISTER_U16, 'bms_min_cell_temp', "BMS Min Cell Temperature", UnitOfTemperature.CELSIUS, 10, 'input', SCAN_GROUP_BATTERY, SensorDeviceClass.TEMPERATURE, SensorStateClass.MEASUREMENT),
+    (43012, REGISTER_U16, 'bms_max_cell_volt_id', "BMS Max Cell Voltage ID", None, 1, 'input', SCAN_GROUP_BATTERY, None, None),
+    (43013, REGISTER_U16, 'bms_max_cell_volt', "BMS Max Cell Voltage", UnitOfElectricPotential.VOLT, 1000, 'input', SCAN_GROUP_BATTERY, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+    (43014, REGISTER_U16, 'bms_min_cell_volt_id', "BMS Min Cell Voltage ID", None, 1, 'input', SCAN_GROUP_BATTERY, None, None),
+    (43015, REGISTER_U16, 'bms_min_cell_volt', "BMS Min Cell Voltage", UnitOfElectricPotential.VOLT, 1000, 'input', SCAN_GROUP_BATTERY, SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT),
+    (43016, REGISTER_U32, 'bms_error_code', "BMS ERROR CODE", None, 1, 'input', SCAN_GROUP_BATTERY, None, None), # Needs parsing
+    (43018, REGISTER_U32, 'bms_warn_code', "BMS WARN CODE", None, 1, 'input', SCAN_GROUP_BATTERY, None, None), # Needs parsing
+]
+_combined_sensor_types = _holding_regs + _input_regs
+
+# --- Plugin Třída ---
+class PluginSunway:
+
+    # === VLOŽENÉ DEFINICE VLASTNÍCH POPISNÝCH TŘÍD ===
+    @dataclass(kw_only=True)
+    class SunwaySensorEntityDescription(SensorEntityDescription):
+        register_address: int
+        register_count: int
+        register_type: str = "holding"
+        data_type: str
+        scale: float | Dict[Any, Any] | Callable[..., Any] = 1.0
+        read_only: bool = True
+        scan_group: str = SCAN_GROUP_POWERS
+        allowedtypes: Optional[int] = None
+        blacklist: Optional[List[str]] = field(default_factory=list)
+        value_series: Optional[Any] = None
+        initvalue: Optional[Any] = None
+        read_scale_exceptions: Optional[Dict[Any, Any]] = None
+        fmt: Optional[str] = None # <-- PŘIDÁNO
+
+    @dataclass(kw_only=True)
+    class SunwayNumberEntityDescription(NumberEntityDescription):
+        register: int
+        read_scale_exceptions: Optional[Dict[Any, Any]] = None
+        allowedtypes: Optional[int] = None
+        blacklist: Optional[List[str]] = field(default_factory=list)
+        write_scale_exceptions: Optional[Dict[Any, Any]] = None
+        scale: float = 1.0
+        type: str | None = None
+        initvalue: Optional[Any] = None
+        fmt: Optional[str] = None # <-- PŘIDÁNO
+
+    @dataclass(kw_only=True)
+    class SunwaySwitchEntityDescription(SwitchEntityDescription):
+        register: int
+        allowedtypes: Optional[int] = None
+        blacklist: Optional[List[str]] = field(default_factory=list)
+        command_on: Optional[int] = 1
+        command_off: Optional[int] = 0
+        write_method: Optional[str] = None
+        initvalue: Optional[Any] = None
+        sensor_key: str | None = None
+        register_bit: Optional[int] = None
+
+    @dataclass(kw_only=True)
+    class SunwaySelectEntityDescription(SelectEntityDescription):
+        register: int
+        allowedtypes: Optional[int] = None
+        blacklist: Optional[List[str]] = field(default_factory=list)
+        option_dict: Dict[Any, str] = field(default_factory=dict)
+        write_method: Optional[str] = None
+        initvalue: Optional[Any] = None
+
+    @dataclass(kw_only=True)
+    class SunwayButtonEntityDescription(ButtonEntityDescription):
+        register: int
+        allowedtypes: Optional[int] = None
+        blacklist: Optional[List[str]] = field(default_factory=list)
+        command: Optional[Any] = None
+        write_method: Optional[str] = None
+        initvalue: Optional[Any] = None
+    # === KONEC VLOŽENÝCH DEFINIC ===
+
+    # --- Plugin Metainfo ---
+    plugin_name = "Sunway (Custom)"
+    plugin_manufacturer = "Sunway"
+
+    # --- Modbus Settings ---
+    order16 = Endian.BIG
+    order32 = Endian.BIG
+
+    # --- Atributy třídy s definicemi ---
+    SENSOR_TYPES: List['PluginSunway.SunwaySensorEntityDescription'] = []
+    BUTTON_TYPES: List['PluginSunway.SunwayButtonEntityDescription'] = []
+    NUMBER_TYPES: List['PluginSunway.SunwayNumberEntityDescription'] = []
+    SELECT_TYPES: List['PluginSunway.SunwaySelectEntityDescription'] = []
+    SWITCH_TYPES: List['PluginSunway.SunwaySwitchEntityDescription'] = []
+
+    # Slovník RW registrů pro interní použití
+    plugin_writable_registers = {
+        "grid_injection_limit_switch": { "register": 25100, "type": REGISTER_U16, "limit": {True: 1, False: 0}, "ha_type": "switch" },
+        "grid_injection_limit_setting": { "register": 25103, "type": REGISTER_U16, "scale": 0.1, "unit": PERCENTAGE, "min": 0.0, "max": 100.0, "step": 0.1, "ha_type": "number"},
+        "eps_ups_switch": { "register": 50001, "type": REGISTER_U16, "limit": {True: 1, False: 0}, "ha_type": "switch" },
+        "off_grid_voltage_setting": { "register": 50004, "type": REGISTER_U16, "scale": 10, "unit": UnitOfElectricPotential.VOLT, "ha_type": "number" },
+        "off_grid_frequency_setting": { "register": 50005, "type": REGISTER_U16, "scale": 100, "unit": UnitOfFrequency.HERTZ, "min": 45.00, "max": 65.00, "step": 0.01, "ha_type": "number" },
+        "hybrid_working_mode": { "register": 50000, "type": REGISTER_U16, "scale": 1, "ha_type": "select" },
+        "off_grid_asymmetric_switch": { "register": 50006, "type": REGISTER_U16, "limit": {True: 1, False: 0}, "ha_type": "switch" },
+        "peak_load_shifting_switch": { "register": 50007, "type": REGISTER_U16, "limit": {True: 1, False: 0}, "ha_type": "switch" },
+        "max_grid_power_setting": { "register": 50009, "type": REGISTER_U16, "scale": 10, "unit": "kVA", "ha_type": "number" },
+        "inverter_ac_power_setting_mode": { "register": 50202, "type": REGISTER_U16, "scale": 1, "ha_type": "select" },
+        "total_ac_power_setting": { "register": 50203, "type": REGISTER_S16, "scale": 100, "unit": UnitOfPower.KILO_WATT, "ha_type": "number" },
+        "phase_a_power_setting": { "register": 50204, "type": REGISTER_S16, "scale": 100, "unit": UnitOfPower.KILO_WATT, "ha_type": "number" },
+        "phase_b_power_setting": { "register": 50205, "type": REGISTER_S16, "scale": 100, "unit": UnitOfPower.KILO_WATT, "ha_type": "number" },
+        "phase_c_power_setting": { "register": 50206, "type": REGISTER_S16, "scale": 100, "unit": UnitOfPower.KILO_WATT, "ha_type": "number" },
+        "battery_power_setting": { "register": 50207, "type": REGISTER_S16, "scale": 100, "unit": UnitOfPower.KILO_WATT, "ha_type": "number" },
+    }
+
+    # Naplnění SENSOR_TYPES
+    for reg_tuple in _combined_sensor_types:
+        addr, reg_const, key, name, unit, scale_div, read_type, scan_grp, dev_class, state_class = reg_tuple
+        count = 1
+        if reg_const in (REGISTER_U32, REGISTER_S32): count = 2
+        elif reg_const == REGISTER_STR: count = 8
+        scale_val = scale_div
+        if isinstance(scale_val, (int, float)) and scale_val < 1 and scale_val != 0: scale_val = 1.0 / scale_val
+        SENSOR_TYPES.append(SunwaySensorEntityDescription(
+             key=key, name=name, native_unit_of_measurement=unit, device_class=dev_class, state_class=state_class,
+             register_address=addr, register_count=count, data_type=reg_const, scale=scale_val,
+             register_type=read_type, scan_group=scan_grp, read_only=(read_type=='input'),
+             allowedtypes=None, blacklist=[], value_series=None, initvalue=None, read_scale_exceptions=None,
+             fmt=None # Přidáno fmt=None
+        ))
+
+    # Naplnění NUMBER_TYPES, SWITCH_TYPES, SELECT_TYPES
+    for key, params in plugin_writable_registers.items():
+        name = f"Sunway {key.replace('_', ' ').title()}"
+        entity_type = params.get("ha_type")
+        allowedtypes = None
+        blacklist = []
+        register_addr = params.get("register")
+        initvalue = None
+        write_method = None
+
+        if entity_type == "switch":
+            sensor_key_guess = f"{key}_state"
+            SWITCH_TYPES.append(SunwaySwitchEntityDescription(
+                key=key, name=name,
+                register=register_addr,
+                allowedtypes=allowedtypes, blacklist=blacklist,
+                command_on=params.get("limit", {}).get(True, 1),
+                command_off=params.get("limit", {}).get(False, 0),
+                write_method=write_method, initvalue=initvalue,
+                sensor_key=sensor_key_guess, register_bit=None
+            ))
+        elif entity_type == "number":
+            scale = params.get("scale", 1.0)
+            step = params.get("step")
+            if step is None: step = 0.1 if scale < 1 else (1.0 / scale if scale > 1 else 1.0)
+            min_val = params.get("min"); max_val = params.get("max")
+            min_val = float(min_val) if min_val is not None else None
+            max_val = float(max_val) if max_val is not None else None
+
+            NUMBER_TYPES.append(SunwayNumberEntityDescription(
+                key=key, name=name, native_unit_of_measurement=params.get("unit"),
+                native_min_value=min_val, native_max_value=max_val, native_step=step,
+                mode=NumberMode(params.get("mode", "auto")),
+                register=register_addr, scale=scale, type=params.get("type"),
+                read_scale_exceptions=None, allowedtypes=allowedtypes, blacklist=blacklist, initvalue=initvalue,
+                fmt=None # Přidáno fmt=None
+            ))
+        elif entity_type == "select":
+             option_dict_val = params.get("options", {})
+             options_list = list(option_dict_val.values())
+             if not options_list: options_list = ["Not Configured"] ; option_dict_val = {0: "Not Configured"}
+             SELECT_TYPES.append(SunwaySelectEntityDescription(
+                 key=key, name=name, options=options_list, register=register_addr,
+                 option_dict=option_dict_val, allowedtypes=allowedtypes, blacklist=blacklist,
+                 write_method=write_method, initvalue=initvalue
+            ))
+
+    # --- Plugin Specific Functions --- (jako metody třídy)
+    def isAwake(self, datadict): return True
+    def localDataCallback(self, hub): pass
+
+    async def async_determineInverterType(self, hub, config):
+        # ... (stejné jako v předchozí verzi) ...
+        _LOGGER.info("Sunway Plugin: Assuming fixed inverter type.")
+        try:
+             res = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=10000, count=8)
+             if res and not res.isError() and hasattr(res, 'registers'):
+                 decoder = BinaryPayloadDecoder.fromRegisters(res.registers, byteorder=self.order16, wordorder=self.order32)
+                 sn = decoder.decode_string(16).rstrip(b'\x00').decode('utf-8', errors='ignore')
+                 if hasattr(hub,'seriesnumber'): hub.seriesnumber = sn
+                 hub.data['inverter_sn'] = sn
+                 _LOGGER.info(f"Sunway Plugin: Read serial number: {sn}")
+             else:
+                 _LOGGER.warning(f"Sunway Plugin: Failed to read serial number during init: {res}")
+        except Exception as e:
+            _LOGGER.warning(f"Sunway Plugin: Error reading serial number during init: {e}", exc_info=True)
+        return 1
+
+    def matchInverterWithMask(self, invertertype=None, allowedtypes=None, serialnumber=None, blacklist=None ):
+        return True
+
+    BATTERY_CONFIG = None
+
+# --- Vytvoření instance pluginu ---
+plugin_instance = PluginSunway()
