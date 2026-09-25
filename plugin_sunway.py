@@ -29,6 +29,7 @@ from homeassistant.const import (
     UnitOfTime,
 )
 from homeassistant.helpers.entity import EntityCategory
+from homeassistant.util import dt as dt_util
 
 # Importy pro novou architekturu [cite: 8]
 from .pymodbus_compat import DataType, convert_from_registers
@@ -101,7 +102,7 @@ def sunway_rtc_function(initval: List[int], descr: Any, datadict: Dict[str, Any]
 
 def value_function_sync_rtc_sunway(initval: Any, descr: Any, datadict: Dict[str, Any]) -> List[Tuple[str, int]]:
     """Vytvoří payload pro synchronizaci času."""
-    now = datetime.now()
+    now = dt_util.now()  # čas v časové zóně HA, ne systémový (v HA OS často UTC)
     year_val = now.year % 100
     return [
         (REGISTER_U16, (year_val << 8) | now.month),
@@ -151,17 +152,15 @@ def create_periods_enable_payload(i: Any, d: Any, data: Dict[str, Any]) -> List[
             periods_enable_mask |= 1 << (period_num - 1)
     return [(REGISTER_U16, periods_enable_mask)]
 
-def value_function_energy_no_negative(val: Any, descr: Any, datadict: Dict[str, Any]) -> float:
+def value_function_energy_no_negative(val: Any, descr: Any, datadict: Dict[str, Any]) -> Optional[float]:
     """
     KLÍČOVÁ FUNKCE: Ochrana proti záporným hodnotám v noci (reset střídače).
-    Pokud je hodnota záporná, vrátí 0.0. Jinak aplikuje měřítko 0.1[cite: 17, 18, 19].
+    Neplatná (záporná) hodnota vrací None -> senzor je chvíli "unknown".
+    Vracet 0.0 nelze: u TOTAL_INCREASING by HA pokles na 0 bral jako reset
+    a po návratu skutečné hodnoty by se denní energie započítala podruhé.
     """
-    if val is None:
-        return 0.0
-    if val < 0:
-        return 0.0
-    if val > 10000000: 
-         return 0.0
+    if val is None or val < 0:
+        return None
     return round(val * 0.1, 1)
 
 # ================================= DEFINICE ENTIT =============================================
@@ -230,20 +229,20 @@ SWITCH_TYPES = [
     SunwayModbusSwitchEntityDescription(name="Posun špičkové zátěže (Peak Shifting)", key="peak_load_shifting_switch", register=50007, write_method=WRITE_SINGLE_MODBUS, register_bit=0, value_function=lambda bit, state, sk, d: 1 if state else 0, sensor_key="peak_load_shifting_switch_state"),
     SunwayModbusSwitchEntityDescription(name="On-grid ochrana SOC baterie", key="on_grid_battery_soc_protection_switch", register=52502, write_method=WRITE_SINGLE_MODBUS, register_bit=0, value_function=lambda bit, state, sk, d: 1 if state else 0, sensor_key="on_grid_battery_soc_protection_switch_state", entity_category=EntityCategory.CONFIG, icon="mdi:battery-lock"),
     SunwayModbusSwitchEntityDescription(name="Off-grid ochrana SOC baterie", key="off_grid_battery_soc_protection_switch", register=52504, write_method=WRITE_SINGLE_MODBUS, register_bit=0, value_function=lambda bit, state, sk, d: 1 if state else 0, sensor_key="off_grid_battery_soc_protection_switch_state", entity_category=EntityCategory.CONFIG, icon="mdi:battery-lock-outline"),
-    SunwayModbusSwitchEntityDescription(name="Zapnout/Vypnout Off-grid funkci", key="off_grid_function_switch", register=50200, write_method=WRITE_SINGLE_MODBUS),
-    SunwayModbusSwitchEntityDescription(name="Vymazat příznak přetížení v Off-grid", key="clear_off_grid_overload_flag", register=50201, write_method=WRITE_SINGLE_MODBUS),
-    SunwayModbusSwitchEntityDescription(name="Perioda 1: Povolit nabíjení/vybíjení", key="period_1_charge_discharge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, initvalue=False),
-    SunwayModbusSwitchEntityDescription(name="Perioda 2: Povolit nabíjení/vybíjení", key="period_2_charge_discharge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, initvalue=False),
-    SunwayModbusSwitchEntityDescription(name="Perioda 3: Povolit nabíjení/vybíjení", key="period_3_charge_discharge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, initvalue=False),
-    SunwayModbusSwitchEntityDescription(name="Perioda 4: Povolit nabíjení/vybíjení", key="period_4_charge_discharge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, initvalue=False),
-    SunwayModbusSwitchEntityDescription(name="Perioda 5: Povolit nabíjení/vybíjení", key="period_5_charge_discharge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, initvalue=False),
-    SunwayModbusSwitchEntityDescription(name="Perioda 6: Povolit nabíjení/vybíjení", key="period_6_charge_discharge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, initvalue=False),
-    SunwayModbusSwitchEntityDescription(name="Perioda 1: Povolit nabíjení ze sítě", key="period_1_ac_charge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, icon="mdi:power-plug", initvalue=False),
-    SunwayModbusSwitchEntityDescription(name="Perioda 2: Povolit nabíjení ze sítě", key="period_2_ac_charge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, icon="mdi:power-plug", initvalue=False),
-    SunwayModbusSwitchEntityDescription(name="Perioda 3: Povolit nabíjení ze sítě", key="period_3_ac_charge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, icon="mdi:power-plug", initvalue=False),
-    SunwayModbusSwitchEntityDescription(name="Perioda 4: Povolit nabíjení ze sítě", key="period_4_ac_charge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, icon="mdi:power-plug", initvalue=False),
-    SunwayModbusSwitchEntityDescription(name="Perioda 5: Povolit nabíjení ze sítě", key="period_5_ac_charge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, icon="mdi:power-plug", initvalue=False),
-    SunwayModbusSwitchEntityDescription(name="Perioda 6: Povolit nabíjení ze sítě", key="period_6_ac_charge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, icon="mdi:power-plug", initvalue=False),
+    SunwayModbusSwitchEntityDescription(name="Zapnout/Vypnout Off-grid funkci", key="off_grid_function_switch", value_function=lambda bit, state, sk, d: 1 if state else 0, register=50200, write_method=WRITE_SINGLE_MODBUS),
+    SunwayModbusSwitchEntityDescription(name="Vymazat příznak přetížení v Off-grid", key="clear_off_grid_overload_flag", value_function=lambda bit, state, sk, d: 1 if state else 0, register=50201, write_method=WRITE_SINGLE_MODBUS),
+    SunwayModbusSwitchEntityDescription(name="Perioda 1: Povolit nabíjení/vybíjení", key="period_1_charge_discharge_enable", sensor_key="period_1_charge_discharge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, initvalue=False),
+    SunwayModbusSwitchEntityDescription(name="Perioda 2: Povolit nabíjení/vybíjení", key="period_2_charge_discharge_enable", sensor_key="period_2_charge_discharge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, initvalue=False),
+    SunwayModbusSwitchEntityDescription(name="Perioda 3: Povolit nabíjení/vybíjení", key="period_3_charge_discharge_enable", sensor_key="period_3_charge_discharge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, initvalue=False),
+    SunwayModbusSwitchEntityDescription(name="Perioda 4: Povolit nabíjení/vybíjení", key="period_4_charge_discharge_enable", sensor_key="period_4_charge_discharge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, initvalue=False),
+    SunwayModbusSwitchEntityDescription(name="Perioda 5: Povolit nabíjení/vybíjení", key="period_5_charge_discharge_enable", sensor_key="period_5_charge_discharge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, initvalue=False),
+    SunwayModbusSwitchEntityDescription(name="Perioda 6: Povolit nabíjení/vybíjení", key="period_6_charge_discharge_enable", sensor_key="period_6_charge_discharge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, initvalue=False),
+    SunwayModbusSwitchEntityDescription(name="Perioda 1: Povolit nabíjení ze sítě", key="period_1_ac_charge_enable", sensor_key="period_1_ac_charge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, icon="mdi:power-plug", initvalue=False),
+    SunwayModbusSwitchEntityDescription(name="Perioda 2: Povolit nabíjení ze sítě", key="period_2_ac_charge_enable", sensor_key="period_2_ac_charge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, icon="mdi:power-plug", initvalue=False),
+    SunwayModbusSwitchEntityDescription(name="Perioda 3: Povolit nabíjení ze sítě", key="period_3_ac_charge_enable", sensor_key="period_3_ac_charge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, icon="mdi:power-plug", initvalue=False),
+    SunwayModbusSwitchEntityDescription(name="Perioda 4: Povolit nabíjení ze sítě", key="period_4_ac_charge_enable", sensor_key="period_4_ac_charge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, icon="mdi:power-plug", initvalue=False),
+    SunwayModbusSwitchEntityDescription(name="Perioda 5: Povolit nabíjení ze sítě", key="period_5_ac_charge_enable", sensor_key="period_5_ac_charge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, icon="mdi:power-plug", initvalue=False),
+    SunwayModbusSwitchEntityDescription(name="Perioda 6: Povolit nabíjení ze sítě", key="period_6_ac_charge_enable", sensor_key="period_6_ac_charge_enable", write_method=WRITE_DATA_LOCAL, entity_category=EntityCategory.CONFIG, icon="mdi:power-plug", initvalue=False),
 ]
 
 SENSOR_TYPES = [
@@ -265,35 +264,35 @@ SENSOR_TYPES = [
     SunwayModbusSensorEntityDescription(key="ems_phase_b_power_setting", register=50205, register_data_type=REGISTER_S16, scale=10, internal=True),
     SunwayModbusSensorEntityDescription(key="ems_phase_c_power_setting", register=50206, register_data_type=REGISTER_S16, scale=10, internal=True),
     SunwayModbusSensorEntityDescription(key="pv_power_setting", register=50211, scale=1, internal=True),
-    SunwayModbusSensorEntityDescription(key="hybrid_inverter_working_mode", register=50000, scale={v: k for k, v in {1: "Obecný režim", 2: "Ekonomický režim", 3: "Režim UPS", 258: "EMS Obecný režim", 259: "EMS Režim řízení AC", 513: "EMS Režim řízení baterie", 772: "EMS Off-Grid režim"}.items()}, internal=True),
-    SunwayModbusSensorEntityDescription(key="inverter_ac_power_setting_mode", register=50202, scale={v: k for k, v in {0: "Vypnuto", 1: "Nastavení celkového výkonu", 2: "Nastavení výkonu pro každou fázi"}.items()}, internal=True),
-    SunwayModbusSensorEntityDescription(key="priority_power_output_setting", register=50210, scale={v: k for k, v in {0: "Priorita výstupu z FV", 1: "Priorita výstupu z baterie"}.items()}, internal=True),
-    SunwayModbusSensorEntityDescription(key="period_1_charge_discharge_mode", register=PERIOD_BASE_REG + 0, scale={v: k for k, v in {0: "Žádný", 1: "Nabíjení", 2: "Vybíjení"}.items()}, internal=True),
+    SunwayModbusSensorEntityDescription(key="hybrid_inverter_working_mode", register=50000, scale={1: "Obecný režim", 2: "Ekonomický režim", 3: "Režim UPS", 258: "EMS Obecný režim", 259: "EMS Režim řízení AC", 513: "EMS Režim řízení baterie", 772: "EMS Off-Grid režim"}, internal=True),
+    SunwayModbusSensorEntityDescription(key="inverter_ac_power_setting_mode", register=50202, scale={0: "Vypnuto", 1: "Nastavení celkového výkonu", 2: "Nastavení výkonu pro každou fázi"}, internal=True),
+    SunwayModbusSensorEntityDescription(key="priority_power_output_setting", register=50210, scale={0: "Priorita výstupu z FV", 1: "Priorita výstupu z baterie"}, internal=True),
+    SunwayModbusSensorEntityDescription(key="period_1_charge_discharge_mode", register=PERIOD_BASE_REG + 0, scale={0: "Žádný", 1: "Nabíjení", 2: "Vybíjení"}, internal=True),
     SunwayModbusSensorEntityDescription(key="period_1_ac_charge_enable", register=PERIOD_BASE_REG + 1, scale={0: False, 1: True}, internal=True),
     SunwayModbusSensorEntityDescription(key="period_1_power_limit", register=PERIOD_BASE_REG + 3, scale=0.1, internal=True),
     SunwayModbusSensorEntityDescription(key="period_1_start_time", register=PERIOD_BASE_REG + 5, scale=decode_sunway_time, internal=True),
     SunwayModbusSensorEntityDescription(key="period_1_stop_time", register=PERIOD_BASE_REG + 6, scale=decode_sunway_time, internal=True),
-    SunwayModbusSensorEntityDescription(key="period_2_charge_discharge_mode", register=PERIOD_BASE_REG + 1 * PERIOD_OFFSET + 0, scale={v: k for k, v in {0: "Žádný", 1: "Nabíjení", 2: "Vybíjení"}.items()}, internal=True),
+    SunwayModbusSensorEntityDescription(key="period_2_charge_discharge_mode", register=PERIOD_BASE_REG + 1 * PERIOD_OFFSET + 0, scale={0: "Žádný", 1: "Nabíjení", 2: "Vybíjení"}, internal=True),
     SunwayModbusSensorEntityDescription(key="period_2_ac_charge_enable", register=PERIOD_BASE_REG + 1 * PERIOD_OFFSET + 1, scale={0: False, 1: True}, internal=True),
     SunwayModbusSensorEntityDescription(key="period_2_power_limit", register=PERIOD_BASE_REG + 1 * PERIOD_OFFSET + 3, scale=0.1, internal=True),
     SunwayModbusSensorEntityDescription(key="period_2_start_time", register=PERIOD_BASE_REG + 1 * PERIOD_OFFSET + 5, scale=decode_sunway_time, internal=True),
     SunwayModbusSensorEntityDescription(key="period_2_stop_time", register=PERIOD_BASE_REG + 1 * PERIOD_OFFSET + 6, scale=decode_sunway_time, internal=True),
-    SunwayModbusSensorEntityDescription(key="period_3_charge_discharge_mode", register=PERIOD_BASE_REG + 2 * PERIOD_OFFSET + 0, scale={v: k for k, v in {0: "Žádný", 1: "Nabíjení", 2: "Vybíjení"}.items()}, internal=True),
+    SunwayModbusSensorEntityDescription(key="period_3_charge_discharge_mode", register=PERIOD_BASE_REG + 2 * PERIOD_OFFSET + 0, scale={0: "Žádný", 1: "Nabíjení", 2: "Vybíjení"}, internal=True),
     SunwayModbusSensorEntityDescription(key="period_3_ac_charge_enable", register=PERIOD_BASE_REG + 2 * PERIOD_OFFSET + 1, scale={0: False, 1: True}, internal=True),
     SunwayModbusSensorEntityDescription(key="period_3_power_limit", register=PERIOD_BASE_REG + 2 * PERIOD_OFFSET + 3, scale=0.1, internal=True),
     SunwayModbusSensorEntityDescription(key="period_3_start_time", register=PERIOD_BASE_REG + 2 * PERIOD_OFFSET + 5, scale=decode_sunway_time, internal=True),
     SunwayModbusSensorEntityDescription(key="period_3_stop_time", register=PERIOD_BASE_REG + 2 * PERIOD_OFFSET + 6, scale=decode_sunway_time, internal=True),
-    SunwayModbusSensorEntityDescription(key="period_4_charge_discharge_mode", register=PERIOD_BASE_REG + 3 * PERIOD_OFFSET + 0, scale={v: k for k, v in {0: "Žádný", 1: "Nabíjení", 2: "Vybíjení"}.items()}, internal=True),
+    SunwayModbusSensorEntityDescription(key="period_4_charge_discharge_mode", register=PERIOD_BASE_REG + 3 * PERIOD_OFFSET + 0, scale={0: "Žádný", 1: "Nabíjení", 2: "Vybíjení"}, internal=True),
     SunwayModbusSensorEntityDescription(key="period_4_ac_charge_enable", register=PERIOD_BASE_REG + 3 * PERIOD_OFFSET + 1, scale={0: False, 1: True}, internal=True),
     SunwayModbusSensorEntityDescription(key="period_4_power_limit", register=PERIOD_BASE_REG + 3 * PERIOD_OFFSET + 3, scale=0.1, internal=True),
     SunwayModbusSensorEntityDescription(key="period_4_start_time", register=PERIOD_BASE_REG + 3 * PERIOD_OFFSET + 5, scale=decode_sunway_time, internal=True),
     SunwayModbusSensorEntityDescription(key="period_4_stop_time", register=PERIOD_BASE_REG + 3 * PERIOD_OFFSET + 6, scale=decode_sunway_time, internal=True),
-    SunwayModbusSensorEntityDescription(key="period_5_charge_discharge_mode", register=PERIOD_BASE_REG + 4 * PERIOD_OFFSET + 0, scale={v: k for k, v in {0: "Žádný", 1: "Nabíjení", 2: "Vybíjení"}.items()}, internal=True),
+    SunwayModbusSensorEntityDescription(key="period_5_charge_discharge_mode", register=PERIOD_BASE_REG + 4 * PERIOD_OFFSET + 0, scale={0: "Žádný", 1: "Nabíjení", 2: "Vybíjení"}, internal=True),
     SunwayModbusSensorEntityDescription(key="period_5_ac_charge_enable", register=PERIOD_BASE_REG + 4 * PERIOD_OFFSET + 1, scale={0: False, 1: True}, internal=True),
     SunwayModbusSensorEntityDescription(key="period_5_power_limit", register=PERIOD_BASE_REG + 4 * PERIOD_OFFSET + 3, scale=0.1, internal=True),
     SunwayModbusSensorEntityDescription(key="period_5_start_time", register=PERIOD_BASE_REG + 4 * PERIOD_OFFSET + 5, scale=decode_sunway_time, internal=True),
     SunwayModbusSensorEntityDescription(key="period_5_stop_time", register=PERIOD_BASE_REG + 4 * PERIOD_OFFSET + 6, scale=decode_sunway_time, internal=True),
-    SunwayModbusSensorEntityDescription(key="period_6_charge_discharge_mode", register=PERIOD_BASE_REG + 5 * PERIOD_OFFSET + 0, scale={v: k for k, v in {0: "Žádný", 1: "Nabíjení", 2: "Vybíjení"}.items()}, internal=True),
+    SunwayModbusSensorEntityDescription(key="period_6_charge_discharge_mode", register=PERIOD_BASE_REG + 5 * PERIOD_OFFSET + 0, scale={0: "Žádný", 1: "Nabíjení", 2: "Vybíjení"}, internal=True),
     SunwayModbusSensorEntityDescription(key="period_6_ac_charge_enable", register=PERIOD_BASE_REG + 5 * PERIOD_OFFSET + 1, scale={0: False, 1: True}, internal=True),
     SunwayModbusSensorEntityDescription(key="period_6_power_limit", register=PERIOD_BASE_REG + 5 * PERIOD_OFFSET + 3, scale=0.1, internal=True),
     SunwayModbusSensorEntityDescription(key="period_6_start_time", register=PERIOD_BASE_REG + 5 * PERIOD_OFFSET + 5, scale=decode_sunway_time, internal=True),
@@ -379,9 +378,9 @@ SENSOR_TYPES = [
     SunwayModbusSensorEntityDescription(name="BMS Max. nabíjecí proud", key="bms_max_charge_current", register=42005, scale=0.1, rounding=1, native_unit_of_measurement=UnitOfElectricCurrent.AMPERE, device_class=SensorDeviceClass.CURRENT, entity_category=EntityCategory.DIAGNOSTIC),
     SunwayModbusSensorEntityDescription(name="BMS Max. vybíjecí proud", key="bms_max_discharge_current", register=42006, scale=0.1, rounding=1, native_unit_of_measurement=UnitOfElectricCurrent.AMPERE, device_class=SensorDeviceClass.CURRENT, entity_category=EntityCategory.DIAGNOSTIC),
     SunwayModbusSensorEntityDescription(name="BMS Status", key="bms_status", register=43002, entity_category=EntityCategory.DIAGNOSTIC),
-    SunwayModbusSensorEntityDescription(name="BMS Teplota packu", key="bms_pack_temperature", register=43003, scale=0.1, rounding=1, native_unit_of_measurement=UnitOfTemperature.CELSIUS, device_class=SensorDeviceClass.TEMPERATURE, state_class=SensorStateClass.MEASUREMENT, entity_category=EntityCategory.DIAGNOSTIC),
-    SunwayModbusSensorEntityDescription(name="BMS Max. teplota článku", key="bms_max_cell_temperature", register=43009, scale=0.1, rounding=1, native_unit_of_measurement=UnitOfTemperature.CELSIUS, device_class=SensorDeviceClass.TEMPERATURE, entity_category=EntityCategory.DIAGNOSTIC),
-    SunwayModbusSensorEntityDescription(name="BMS Min. teplota článku", key="bms_min_cell_temperature", register=43011, scale=0.1, rounding=1, native_unit_of_measurement=UnitOfTemperature.CELSIUS, device_class=SensorDeviceClass.TEMPERATURE, entity_category=EntityCategory.DIAGNOSTIC),
+    SunwayModbusSensorEntityDescription(name="BMS Teplota packu", key="bms_pack_temperature", register=43003, register_data_type=REGISTER_S16, scale=0.1, rounding=1, native_unit_of_measurement=UnitOfTemperature.CELSIUS, device_class=SensorDeviceClass.TEMPERATURE, state_class=SensorStateClass.MEASUREMENT, entity_category=EntityCategory.DIAGNOSTIC),
+    SunwayModbusSensorEntityDescription(name="BMS Max. teplota článku", key="bms_max_cell_temperature", register=43009, register_data_type=REGISTER_S16, scale=0.1, rounding=1, native_unit_of_measurement=UnitOfTemperature.CELSIUS, device_class=SensorDeviceClass.TEMPERATURE, entity_category=EntityCategory.DIAGNOSTIC),
+    SunwayModbusSensorEntityDescription(name="BMS Min. teplota článku", key="bms_min_cell_temperature", register=43011, register_data_type=REGISTER_S16, scale=0.1, rounding=1, native_unit_of_measurement=UnitOfTemperature.CELSIUS, device_class=SensorDeviceClass.TEMPERATURE, entity_category=EntityCategory.DIAGNOSTIC),
     SunwayModbusSensorEntityDescription(name="BMS Max. napětí článku", key="bms_max_cell_voltage", register=43013, scale=0.001, rounding=3, native_unit_of_measurement=UnitOfElectricPotential.VOLT, device_class=SensorDeviceClass.VOLTAGE, entity_category=EntityCategory.DIAGNOSTIC),
     SunwayModbusSensorEntityDescription(name="BMS Min. napětí článku", key="bms_min_cell_voltage", register=43015, scale=0.001, rounding=3, native_unit_of_measurement=UnitOfElectricPotential.VOLT, device_class=SensorDeviceClass.VOLTAGE, entity_category=EntityCategory.DIAGNOSTIC),
     SunwayModbusSensorEntityDescription(name="BMS Chybový kód (surová hodnota)", key="bms_error_code_raw", register=43016, register_data_type=REGISTER_U32, entity_category=EntityCategory.DIAGNOSTIC, icon="mdi:alert-box"),
