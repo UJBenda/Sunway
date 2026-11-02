@@ -1,7 +1,10 @@
-# Verze pluginu: 2026.05.13.Fix_V3_Architecture_Negative_Values
+# Verze pluginu: 2026.11.02.Fix_SN_8_registers
 # Kompatibilita: Home Assistant 2025.11+ / Solax Modbus 2025.x a novější (V3 Architecture)
 #
 # HISTORIE A POPIS ZMĚN:
+# 2026.11.02 - Sériové číslo (10000) čteno jako 8 registrů podle protokolu. Střídač na dotaz
+#              na 4 registry vrací 16 bajtů dat, což nový transport (tmodbus) odmítne
+#              chybou 'Invalid response PDU length: expected 10, got 18'.
 # 2026.05.13 - Navrácení ochrany proti záporným hodnotám (noční resety). 
 #              Denní výroba a energie (41005, 41001, 41000 atd.) čteny jako REGISTER_S16.
 #              Aplikována funkce 'value_function_energy_no_negative' pro odfiltrování záporných čísel.
@@ -297,7 +300,7 @@ SENSOR_TYPES = [
     SunwayModbusSensorEntityDescription(key="period_6_power_limit", register=PERIOD_BASE_REG + 5 * PERIOD_OFFSET + 3, scale=0.1, internal=True),
     SunwayModbusSensorEntityDescription(key="period_6_start_time", register=PERIOD_BASE_REG + 5 * PERIOD_OFFSET + 5, scale=decode_sunway_time, internal=True),
     SunwayModbusSensorEntityDescription(key="period_6_stop_time", register=PERIOD_BASE_REG + 5 * PERIOD_OFFSET + 6, scale=decode_sunway_time, internal=True),
-    SunwayModbusSensorEntityDescription(name="Sériové číslo střídače", key="inverter_sn", register=10000, register_data_type=REGISTER_STR, wordcount=4, entity_category=EntityCategory.DIAGNOSTIC),
+    SunwayModbusSensorEntityDescription(name="Sériové číslo střídače", key="inverter_sn", register=10000, register_data_type=REGISTER_STR, wordcount=8, entity_category=EntityCategory.DIAGNOSTIC),
     SunwayModbusSensorEntityDescription(name="Verze firmware", key="firmware_version", register=10011, register_data_type=REGISTER_U16, entity_category=EntityCategory.DIAGNOSTIC),
     SunwayModbusSensorEntityDescription(name="RTC", key="rtc", register=10100, register_data_type=REGISTER_WORDS, wordcount=3, scale=sunway_rtc_function, entity_category=EntityCategory.DIAGNOSTIC, icon="mdi:clock"),
     SunwayModbusSensorEntityDescription(name="Provozní stav střídače", key="inverter_running_status", register=10105, scale={0: "Čekání", 1: "Kontrola", 2: "V síti", 3: "Chyba", 4: "Aktualizace firmware", 5: "Mimo síť"}, entity_category=EntityCategory.DIAGNOSTIC),
@@ -400,7 +403,7 @@ class sunway_plugin(plugin_base):
         _LOGGER.info(f"{hub.name}: zkouším určit typ střídače SunWay")
 
         try:
-            inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=10000, count=4)
+            inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=10000, count=8)
         except Exception as ex:
             _LOGGER.error(f"{hub.name}: chyba při čtení sériového čísla: {ex}")
             return 0
